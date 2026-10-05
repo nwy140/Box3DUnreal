@@ -156,7 +156,7 @@ void UBox3DSubsystem::UnregisterStepTickFunctions()
 
 void UBox3DSubsystem::KickAsyncStep(float DeltaTime)
 {
-	if (!bWorldValid || !IsAsyncStepEnabled())
+	if (bExternalSimulationDriven || !bWorldValid || !IsAsyncStepEnabled())
 	{
 		return; // synchronous mode steps from Tick instead
 	}
@@ -186,6 +186,7 @@ void UBox3DSubsystem::KickAsyncStep(float DeltaTime)
 
 void UBox3DSubsystem::JoinAsyncStep()
 {
+    if (bExternalSimulationDriven) return;
 	if (!bWorldValid)
 	{
 		return;
@@ -217,3 +218,4 @@ void UBox3DSubsystem::JoinAsyncStep()
 
 	DispatchPendingEvents();
 }
+

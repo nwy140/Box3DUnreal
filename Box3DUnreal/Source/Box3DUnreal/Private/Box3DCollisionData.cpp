@@ -1,6 +1,8 @@
 // Author: Antonio Lattanzio - emptyvessel
 
 #include "Box3DCollisionData.h"
+#include "Serialization/MemoryWriter.h"
+#include "Misc/SecureHash.h"
 #include "Box3DStaticGeometry.h"
 #include "Misc/PackageName.h"
 
@@ -90,3 +92,38 @@ bool UBox3DCollisionData::IsStale(FString& OutReason) const
 }
 
 #endif // WITH_EDITOR
+
+// Field serialization avoids struct padding, pointers and bake timestamps.
+FString UBox3DCollisionData::ComputeGeometryDigest() const
+{
+    TArray<uint8> Bytes;
+    FMemoryWriter Writer(Bytes, true);
+    uint32 Schema = 1;
+    Writer << Schema;
+    int32 Count = Bodies.Num();
+    Writer << Count;
+    for (const auto& Body : Bodies)
+    {
+        FString Key = Body.ActorKey;
+        Writer << Key;
+        const FVector P = Body.WorldTransform.GetTranslation();
+        const FQuat Q = Body.WorldTransform.GetRotation();
+        const FVector S = Body.WorldTransform.GetScale3D();
+        for (double Value : {P.X,P.Y,P.Z,Q.X,Q.Y,Q.Z,Q.W,S.X,S.Y,S.Z}) Writer << Value;
+        Count = Body.Shapes.Num(); Writer << Count;
+        for (const auto& Shape : Body.Shapes)
+        {
+            uint8 Kind = static_cast<uint8>(Shape.Kind); Writer << Kind;
+            Count = Shape.Points.Num(); Writer << Count;
+            for (const auto& Point : Shape.Points)
+                for (float Value : {Point.X,Point.Y,Point.Z}) Writer << Value;
+            Count = Shape.Indices.Num(); Writer << Count;
+            for (int32 Index : Shape.Indices) Writer << Index;
+            for (float Value : {Shape.CenterA.X,Shape.CenterA.Y,Shape.CenterA.Z,
+                Shape.CenterB.X,Shape.CenterB.Y,Shape.CenterB.Z,Shape.Radius}) Writer << Value;
+        }
+    }
+    uint8 Digest[20];
+    FSHA1::HashBuffer(Bytes.GetData(), Bytes.Num(), Digest);
+    return BytesToHex(Digest, 20);
+}

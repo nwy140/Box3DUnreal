@@ -88,7 +88,19 @@ class BOX3DUNREAL_API UBox3DSubsystem : public UTickableWorldSubsystem
 	GENERATED_BODY()
 
 public:
-	// USubsystem / UWorldSubsystem
+	    /** Select before the first step. External owners submit immutable commands,
+     * snapshot their controllers, and explicitly advance the physics world.
+     * No actor targets, character ticks, event dispatch or accumulator run here. */
+    bool SetExternalSimulationMode();
+    bool IsExternallyDriven() const { return bExternalSimulationDriven; }
+    bool AdvanceExternalPhysicsFrame(int64 ExpectedFrame);
+    /** Call only after successfully restoring a complete composite snapshot. */
+    bool RestoreExternalSimulationFrame(int64 RestoredFrame);
+
+    UPROPERTY(Config, EditAnywhere, Category="Box3D|Rollback")
+    bool bExternalSimulationDriven = false;
+
+    // USubsystem / UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
@@ -471,3 +483,4 @@ private:
 	FDelegateHandle LevelAddedHandle;
 	FDelegateHandle LevelRemovedHandle;
 };
+

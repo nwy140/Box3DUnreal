@@ -14,6 +14,8 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "UObject/Package.h"
 
 static TAutoConsoleVariable<int32> CVarBox3DDebugDraw(
@@ -73,7 +75,8 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 
-	bIsAuthority = InWorld.GetNetMode() != NM_Client;
+	bExternalSimulationDriven |= FParse::Param(FCommandLine::Get(), TEXT("RollbackBox3D"));
+    bIsAuthority = bExternalSimulationDriven || InWorld.GetNetMode() != NM_Client;
 
 	EnabledSinkHandle = IConsoleManager::Get().RegisterConsoleVariableSink_Handle(
 		FConsoleCommandDelegate::CreateUObject(this, &UBox3DSubsystem::OnEnabledCVarChanged));
@@ -86,7 +89,7 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	}
 
 	// Registered even when AsyncStep is off - both hooks early-out, keeping the cvar live.
-	RegisterStepTickFunctions();
+	if (!bExternalSimulationDriven) RegisterStepTickFunctions();
 
 	if (IsBox3DEnabled())
 	{
@@ -173,6 +176,7 @@ void UBox3DSubsystem::DisableSimulation()
 
 void UBox3DSubsystem::OnEnabledCVarChanged()
 {
+    if (bExternalSimulationDriven) return; // A live rollback world cannot be toggled.
 	// Only the authority builds a world; clients never simulate regardless of the switch.
 	if (!bIsAuthority)
 	{
@@ -674,7 +678,7 @@ void UBox3DSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (bWorldValid && !IsAsyncStepEnabled())
+	if (!bExternalSimulationDriven && bWorldValid && !IsAsyncStepEnabled())
 	{
 		StepFixed(DeltaTime);
 
@@ -846,4 +850,39 @@ void UBox3DSubsystem::ApplyRenderInterpolation()
 			Character->ApplyToActor();
 		}
 	}
+}
+
+bool UBox3DSubsystem::SetExternalSimulationMode()
+{
+    check(IsInGameThread());
+    FlushAsyncStep();
+    if (SimulationFrame != 0 || AsyncStepCount != 0)
+        return false;
+    UnregisterStepTickFunctions();
+    bExternalSimulationDriven = true;
+    Accumulator = 0;
+    return true;
+}
+
+bool UBox3DSubsystem::AdvanceExternalPhysicsFrame(int64 ExpectedFrame)
+{
+    check(IsInGameThread());
+    if (!bExternalSimulationDriven || !bWorldValid || StepTask.IsValid() || ExpectedFrame != SimulationFrame)
+        return false;
+    // Snapshot ownership belongs to the caller. In particular, do not run the
+    // stock character mover or derive kinematic commands from render actors.
+    FBox3DFrameProfile Frame;
+    StepWorldOnly(Frame);
+    ++SimulationFrame;
+    return true;
+}
+
+bool UBox3DSubsystem::RestoreExternalSimulationFrame(int64 RestoredFrame)
+{
+    check(IsInGameThread());
+    if (!bExternalSimulationDriven || !bWorldValid || StepTask.IsValid() || RestoredFrame < 0)
+        return false;
+    SimulationFrame = RestoredFrame;
+    Accumulator = 0;
+    return true;
 }

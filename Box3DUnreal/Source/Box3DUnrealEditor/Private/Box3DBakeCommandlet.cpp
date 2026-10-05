@@ -8,6 +8,8 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "FileHelpers.h"
 #include "Engine/World.h"
+#include "Components/StaticMeshComponent.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "UObject/Package.h"
@@ -39,7 +41,25 @@ namespace
 			return true;
 		}
 
-		// Tag path: no component, so use Auto extraction and no winding override.
+		// Without an explicit tag filter, ordinary static Pawn-blocking map meshes
+        // are bake candidates. Designers need no special collision actor.
+        if (StaticTag.IsNone())
+        {
+            TArray<UStaticMeshComponent*> Meshes;
+            Actor->GetComponents<UStaticMeshComponent>(Meshes);
+            for (const UStaticMeshComponent* Mesh : Meshes)
+            {
+                if (Mesh && Mesh->Mobility == EComponentMobility::Static && Mesh->IsCollisionEnabled()
+                    && Mesh->GetCollisionResponseToChannel(ECC_Pawn) == ECR_Block)
+                {
+                    OutSource = Box3D::StaticGeometry::ESource::Auto;
+                    bOutInvertWinding = false;
+                    return true;
+                }
+            }
+        }
+
+        // Tag path: no component, so use Auto extraction and no winding override.
 		if (!StaticTag.IsNone() && Actor->ActorHasTag(StaticTag))
 		{
 			OutSource = Box3D::StaticGeometry::ESource::Auto;
@@ -158,7 +178,8 @@ bool UBox3DBakeCommandlet::BakeMap(const FString& MapPackageName, const FString&
 		FBox3DBakedBody Baked;
 		if (!Box3D::StaticGeometry::ExtractStaticCollision(Actor, Source, bInvert, Baked))
 		{
-			continue; // ExtractStaticCollision already warned
+			UE_LOG(LogBox3D, Error, TEXT("Box3DBake: extraction failed for %s; refusing an incomplete collision bake."), *Actor->GetPathName());
+            return false;
 		}
 		for (const FBox3DBakedShape& Shape : Baked.Shapes)
 		{
@@ -204,6 +225,7 @@ bool UBox3DBakeCommandlet::BakeMap(const FString& MapPackageName, const FString&
 	// as stale. LoadMap read from those same files, so computing it here matches the bake.
 	Data->SourceFingerprint = UBox3DCollisionData::ComputeSourceFingerprint(MapPackageName);
 	Data->Bodies = MoveTemp(BakedBodies);
+    Data->GeometryDigest = Data->ComputeGeometryDigest();
 
 	Data->MarkPackageDirty();
 	if (bNewAsset)
@@ -227,3 +249,5 @@ bool UBox3DBakeCommandlet::BakeMap(const FString& MapPackageName, const FString&
 		*MapPackageName, *OutPackageName, Data->Bodies.Num(), bAnyTriMesh ? TEXT("yes") : TEXT("no"));
 	return true;
 }
+
+

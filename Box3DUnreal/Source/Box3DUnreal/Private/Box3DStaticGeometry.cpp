@@ -321,6 +321,14 @@ namespace Box3D::StaticGeometry
 		// Extracting it needs a b3CreateHeightField path off ULandscapeHeightfieldCollisionComponent.
 		TArray<UPrimitiveComponent*> Primitives;
 		Owner->GetComponents<UPrimitiveComponent>(Primitives);
+        Primitives.RemoveAll([](const UPrimitiveComponent* Prim)
+        {
+            return !Prim || !Prim->IsCollisionEnabled() || Prim->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block;
+        });
+        Primitives.Sort([](const UPrimitiveComponent& A, const UPrimitiveComponent& B)
+        {
+            return A.GetPathName() < B.GetPathName();
+        });
 		// Quiet: an actor with no primitives is usually a deliberate one carrying an explicit
 		// primitive Shape (a bare static pad, for instance), and the caller decides whether that
 		// is a problem. It only matters for Shape=Auto, which warns for itself.
@@ -485,3 +493,4 @@ namespace Box3D::StaticGeometry
 		return FString::Printf(TEXT("%d.%d.%d"), V.major, V.minor, V.revision);
 	}
 } // namespace Box3D::StaticGeometry
+

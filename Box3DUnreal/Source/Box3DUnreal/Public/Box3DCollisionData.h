@@ -78,7 +78,13 @@ public:
 	 *  never disagree about where a level's baked collision lives. */
 	static FString DeriveAssetPackageName(const FString& MapPackageName);
 
-	// Level (or source) this was baked from, for identification in the editor.
+	    /** SHA-1 of explicitly serialized geometry fields in deterministic bake order.
+     * Excludes timestamps and UObject addresses. Peers compare this before play. */
+    FString ComputeGeometryDigest() const;
+    UPROPERTY(VisibleAnywhere, Category="Box3D|Rollback")
+    FString GeometryDigest;
+
+    // Level (or source) this was baked from, for identification in the editor.
 	UPROPERTY(VisibleAnywhere, Category = "Box3D")
 	FString SourceLevel;
 
@@ -121,3 +127,4 @@ public:
 	bool IsStale(FString& OutReason) const;
 #endif
 };
+
