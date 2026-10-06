@@ -8,6 +8,8 @@
 #include "Box3DStaticGeometry.h"
 #include "Box3DStats.h"
 #include "Box3DLog.h"
+#include "box3d_rollback/rollback_shim.h"
+#include "box3d/constants.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/Level.h"
@@ -269,6 +271,9 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 	if (bWorldValid)
 	{
 		b3DestroyWorld(WorldId); // destroys every body, including bulk static ones
+        b3r_destroy(ExternalSnapshotContext);
+        ExternalSnapshotContext = nullptr;
+        bExternalSnapshotFault = false;
 	}
 
 	for (TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
@@ -856,7 +861,7 @@ bool UBox3DSubsystem::SetExternalSimulationMode()
 {
     check(IsInGameThread());
     FlushAsyncStep();
-    if (SimulationFrame != 0 || AsyncStepCount != 0)
+    if (SimulationFrame != 0 || AsyncStepCount != 0 || WorkerCount!=1 || FixedTimeStep!=1.0f/60.0f || SubStepCount!=4 || b3GetLengthUnitsPerMeter()!=1.0f)
         return false;
     UnregisterStepTickFunctions();
     bExternalSimulationDriven = true;
@@ -867,7 +872,7 @@ bool UBox3DSubsystem::SetExternalSimulationMode()
 bool UBox3DSubsystem::AdvanceExternalPhysicsFrame(int64 ExpectedFrame)
 {
     check(IsInGameThread());
-    if (!bExternalSimulationDriven || !bWorldValid || StepTask.IsValid() || ExpectedFrame != SimulationFrame)
+    if (!IsExternalSimulationHealthy() || !bExternalSimulationDriven || StepTask.IsValid() || ExpectedFrame != SimulationFrame || WorkerCount!=1 || FixedTimeStep!=1.0f/60.0f || SubStepCount!=4 || b3GetLengthUnitsPerMeter()!=1.0f)
         return false;
     // Snapshot ownership belongs to the caller. In particular, do not run the
     // stock character mover or derive kinematic commands from render actors.
@@ -885,4 +890,50 @@ bool UBox3DSubsystem::RestoreExternalSimulationFrame(int64 RestoredFrame)
     SimulationFrame = RestoredFrame;
     Accumulator = 0;
     return true;
+}
+
+bool UBox3DSubsystem::CaptureExternalPhysicsSnapshot(TArray<uint8>& OutBytes)
+{
+    check(IsInGameThread());
+    OutBytes.Reset();
+    // Native movers, replicated component commands and breakable-joint wrapper
+    // tables contain extra host state. Until participants capture them, refuse.
+    if (bExternalSnapshotFault || !bExternalSimulationDriven || !bWorldValid || StepTask.IsValid()
+        || !Characters.IsEmpty() || !AllBodies.IsEmpty() || !JointSlots.IsEmpty()) return false;
+    if (!ExternalSnapshotContext) ExternalSnapshotContext = b3r_create(WorldId, 1);
+    if (!ExternalSnapshotContext) return false;
+    const int Size = b3r_save(ExternalSnapshotContext, 0);
+    if (Size <= 0) return false;
+    // LE frame prefix, independent of host struct layout.
+    OutBytes.SetNumUninitialized(Size + 8);
+    for (int Byte = 0; Byte < 8; ++Byte) OutBytes[Byte] = uint8(uint64(SimulationFrame) >> (8*Byte));
+    return b3r_copy_snapshot(ExternalSnapshotContext, 0, OutBytes.GetData()+8, Size) == Size;
+}
+
+bool UBox3DSubsystem::RestoreExternalPhysicsSnapshot(TConstArrayView<uint8> Bytes)
+{
+    check(IsInGameThread());
+    if (bExternalSnapshotFault || !bExternalSimulationDriven || !bWorldValid || StepTask.IsValid()
+        || !ExternalSnapshotContext || Bytes.Num() <= 8) return false;
+    uint64 Frame = 0;
+    for (int Byte = 0; Byte < 8; ++Byte) Frame |= uint64(Bytes[Byte]) << (8*Byte);
+    if (Frame > uint64(MAX_int64) || !b3r_load_snapshot(ExternalSnapshotContext, Bytes.GetData()+8, Bytes.Num()-8))
+    {
+        bExternalSnapshotFault = true; // Partial physics restores must never continue.
+        return false;
+    }
+    SimulationFrame = int64(Frame);
+    Accumulator = 0;
+    return true;
+}
+
+FString UBox3DSubsystem::GetExternalGeometryManifest() const
+{
+    TArray<FString> Entries;
+    for(const auto* Asset:GatherBakedCollisionAssets())
+    {
+        if(!Asset || Asset->GeometryDigest.IsEmpty() || Asset->ComputeGeometryDigest()!=Asset->GeometryDigest)return {};
+        Entries.Add(Asset->GetPathName()+TEXT(":")+Asset->GeometryDigest);
+    }
+    Entries.Sort();return FString::Join(Entries,TEXT(";"));
 }

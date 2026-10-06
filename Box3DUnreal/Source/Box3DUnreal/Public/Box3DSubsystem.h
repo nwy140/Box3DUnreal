@@ -17,6 +17,7 @@ class UBox3DBodyComponent;
 class UBox3DCharacterComponent;
 class UBox3DCollisionData;
 class ULevel;
+struct B3RollbackCtx;
 
 class UBox3DSubsystem;
 
@@ -96,9 +97,18 @@ public:
     bool AdvanceExternalPhysicsFrame(int64 ExpectedFrame);
     /** Call only after successfully restoring a complete composite snapshot. */
     bool RestoreExternalSimulationFrame(int64 RestoredFrame);
+    /** Raw physics + frame counter. The session must separately capture all
+     * application/controller state. Stock actor-driven controllers are refused. */
+    bool CaptureExternalPhysicsSnapshot(TArray<uint8>& OutBytes);
+    bool RestoreExternalPhysicsSnapshot(TConstArrayView<uint8> Bytes);
+    FString GetExternalGeometryManifest() const;
+    bool IsExternalSimulationHealthy() const { return !bExternalSnapshotFault && bWorldValid && Characters.IsEmpty() && AllBodies.IsEmpty() && JointSlots.IsEmpty(); }
 
     UPROPERTY(Config, EditAnywhere, Category="Box3D|Rollback")
     bool bExternalSimulationDriven = false;
+    // Owned registry must outlive the world that borrows restored geometry.
+    B3RollbackCtx* ExternalSnapshotContext = nullptr;
+    bool bExternalSnapshotFault = false;
 
     // USubsystem / UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
@@ -483,4 +493,3 @@ private:
 	FDelegateHandle LevelAddedHandle;
 	FDelegateHandle LevelRemovedHandle;
 };
-

@@ -41,10 +41,12 @@ bool FBox3DBakedMapCollisionTest::RunTest(const FString& Parameters)
     const auto Wall = Cast(FVector(1500,1500,100), FVector(1000,0,0));
     TestTrue(TEXT("Ordinary wall blocks physics ray"), Wall.hit);
     TestTrue(TEXT("Wall is near its authored position"), FMath::Abs(Wall.fraction - 0.475f) < 0.01f);
+    const auto Ramp=Cast(FVector(800,500,500),FVector(0,0,-1000));
+    AddInfo(FString::Printf(TEXT("Ramp ray hit=%d fraction=%f normal=(%f,%f,%f)"),Ramp.hit,Ramp.fraction,Ramp.normal.x,Ramp.normal.y,Ramp.normal.z));
+    TestTrue(TEXT("Offset ramp is at its authored positive Unreal Y"),Ramp.hit && Ramp.fraction<.4f && Ramp.normal.z>.9f && Ramp.normal.z<.99f);
     b3DestroyWorld(World);
     for (b3MeshData* Mesh : Meshes) b3DestroyMesh(Mesh);
     AddInfo(FString::Printf(TEXT("Imported %d static bodies; geometry=%s"), Data->Bodies.Num(), *Data->GeometryDigest));
     return !HasAnyErrors();
 }
 #endif
-

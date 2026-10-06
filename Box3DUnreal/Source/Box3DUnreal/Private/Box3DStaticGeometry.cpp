@@ -138,7 +138,8 @@ namespace Box3D::StaticGeometry
 				{
 					Points.Add(ElemTM.TransformPosition(V));
 				}
-				Created += AppendHull(OutShapes, Points, Scale) ? 1 : 0;
+				if (!AppendHull(OutShapes, Points, Scale)) { OutShapes.Reset(); return 0; }
+                ++Created;
 			}
 
 			// Boxes: 8 corners through the hull path.
@@ -154,7 +155,8 @@ namespace Box3D::StaticGeometry
 				{
 					Corners.Add(ElemTM.TransformPosition(FVector(Sx * He.X, Sy * He.Y, Sz * He.Z)));
 				}
-				Created += AppendHull(OutShapes, Corners, Scale) ? 1 : 0;
+				if (!AppendHull(OutShapes, Corners, Scale)) { OutShapes.Reset(); return 0; }
+                ++Created;
 			}
 
 			// Non-uniform scale can't stay round, so radii use the min axis scale.
@@ -317,7 +319,7 @@ namespace Box3D::StaticGeometry
 		//
 		// This does NOT cover a landscape. Landscape collision is a Chaos heightfield, and no
 		// landscape class implements IInterface_CollisionDataProvider or fills AggGeom, so a
-		// landscape reaches the end of this function and the caller falls back to a bounds box.
+		// landscape reaches the end of this function and the collision bake is refused.
 		// Extracting it needs a b3CreateHeightField path off ULandscapeHeightfieldCollisionComponent.
 		TArray<UPrimitiveComponent*> Primitives;
 		Owner->GetComponents<UPrimitiveComponent>(Primitives);
@@ -355,75 +357,34 @@ namespace Box3D::StaticGeometry
 		// come along or every landscape section stacks up at the origin.
 		const FTransform ActorToWorld = Owner->GetActorTransform();
 
-		if (Source == ESource::ComplexCollision || Source == ESource::Auto)
-		{
-			for (UPrimitiveComponent* Prim : Primitives)
-			{
-				if (Prim == nullptr || !Prim->IsCollisionEnabled())
-				{
-					continue;
-				}
-
-				IInterface_CollisionDataProvider* Provider = FindTriMeshProvider(Prim);
-				if (Provider == nullptr)
-				{
-					continue;
-				}
-
-				const FTransform Relative =
-					Prim->GetComponentTransform().GetRelativeTransform(ActorToWorld);
-				ExtractComplexTriMesh(Provider, Prim->GetComponentScale(), bInvertWinding,
-					Relative, Out.Shapes);
-			}
-
-			if (Out.Shapes.Num() > 0)
-			{
-				return true;
-			}
-
-			if (Source == ESource::ComplexCollision)
-			{
-				UE_LOG(LogBox3D, Warning,
-					TEXT("%s: no complex (tri-mesh) collision available; static body has no shape. ")
-					TEXT("Enable 'Allow CPU Access' / complex collision on the mesh, or use Simple/Auto."),
-					*GetNameSafe(Owner));
-				return false;
-			}
-		}
-
-		// Auto fell through, or SimpleCollision requested.
-		for (UPrimitiveComponent* Prim : Primitives)
-		{
-			if (Prim == nullptr || !Prim->IsCollisionEnabled())
-			{
-				continue;
-			}
-
-			const int32 Before = Out.Shapes.Num();
-			if (ExtractSimpleCollision(Prim, Prim->GetComponentScale(), Out.Shapes) <= 0)
-			{
-				continue;
-			}
-
-			// Placed into the actor's space, the same as the tri-mesh path: without this a box on
-			// a child component is baked at the actor origin instead of where it sits.
-			const FTransform Relative =
-				Prim->GetComponentTransform().GetRelativeTransform(ActorToWorld);
-			if (!Relative.GetRotation().IsIdentity() || !Relative.GetTranslation().IsNearlyZero())
-			{
-				const FTransform Placement(Relative.GetRotation(), Relative.GetTranslation(),
-					FVector::OneVector);
-				for (int32 Index = Before; Index < Out.Shapes.Num(); ++Index)
-				{
-					PlaceShape(Out.Shapes[Index], Placement);
-				}
-			}
-		}
-		if (Out.Shapes.Num() > 0)
-		{
-			return true;
-		}
-
+        // Match Unreal's simple-query collision choice per component. A mixed
+        // actor must retain both its authored simple and complex components.
+        for(UPrimitiveComponent* Prim:Primitives)
+        {
+            const UBodySetup* Setup=Prim->GetBodySetup();
+            const bool Complex=Source==ESource::ComplexCollision ||
+                (Source==ESource::Auto && Setup && Setup->GetCollisionTraceFlag()==CTF_UseComplexAsSimple);
+            const int32 Before=Out.Shapes.Num();
+            const FTransform Relative=Prim->GetComponentTransform().GetRelativeTransform(ActorToWorld);
+            if(Complex)
+            {
+                if(auto* Provider=FindTriMeshProvider(Prim))
+                    ExtractComplexTriMesh(Provider,Prim->GetComponentScale(),bInvertWinding,Relative,Out.Shapes);
+            }
+            else
+            {
+                ExtractSimpleCollision(Prim,Prim->GetComponentScale(),Out.Shapes);
+                const FTransform Placement(Relative.GetRotation(),Relative.GetTranslation(),FVector::OneVector);
+                for(int32 Index=Before;Index<Out.Shapes.Num();++Index)PlaceShape(Out.Shapes[Index],Placement);
+            }
+            if(Out.Shapes.Num()==Before)
+            {
+                UE_LOG(LogBox3D,Warning,TEXT("%s: Pawn-blocking component %s has no usable %s collision; bake refused."),
+                    *GetNameSafe(Owner),*Prim->GetName(),Complex?TEXT("complex"):TEXT("simple"));
+                Out.Shapes.Reset();return false;
+            }
+        }
+        if(!Out.Shapes.IsEmpty())return true;
 		UE_LOG(LogBox3D, Warning,
 			TEXT("%s: no cooked collision found for static body (no tri-mesh, no simple primitives). ")
 			TEXT("A landscape always lands here: its collision is a Chaos heightfield, which this ")
@@ -493,4 +454,3 @@ namespace Box3D::StaticGeometry
 		return FString::Printf(TEXT("%d.%d.%d"), V.major, V.minor, V.revision);
 	}
 } // namespace Box3D::StaticGeometry
-
