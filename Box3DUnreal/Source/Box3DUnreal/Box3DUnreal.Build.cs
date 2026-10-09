@@ -9,7 +9,7 @@ public class Box3DUnreal : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         FPSemantics = FPSemanticsMode.Precise;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "Box3DRollback" });
-        PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine", "PhysicsCore", "InputCore", "Landscape" });
+        PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine", "PhysicsCore", "InputCore", "Landscape", "Chaos" });
     }
 }
 

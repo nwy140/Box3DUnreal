@@ -117,6 +117,27 @@ void UBox3DSubsystem::EnableSimulation()
 	// Rollback scenes are authored by placed physics Blueprints. Never revive
 	// removed map actors through an old BC_ cache or a global collision asset.
 	if (!bExternalSimulationDriven) LoadBakedStaticGeometry();
+    else
+    {
+        UBox3DCollisionData* Scene=NewObject<UBox3DCollisionData>();
+        if(!Box3D::StaticGeometry::ExtractSceneCollision(GetWorld(),Scene->Bodies)) { bExternalSnapshotFault=true; return; }
+        LiveSceneGeometryManifest=TEXT("live-static-scene-v1:")+Scene->ComputeGeometryDigest();
+        FBulkStaticLevel Bucket;
+        b3ShapeDef Shape=b3DefaultShapeDef(); Shape.baseMaterial.friction=StaticGeometryFriction;
+        Shape.baseMaterial.restitution=StaticGeometryRestitution;
+        for(const auto& Geometry:Scene->Bodies)
+        {
+            b3BodyDef Body=b3DefaultBodyDef(); Body.type=b3_staticBody;
+            Body.position=Box3D::ToBox3DPosition(Geometry.WorldTransform.GetLocation());
+            Body.rotation=Box3D::ToBox3DQuat(Geometry.WorldTransform.GetRotation());
+            b3BodyId Id=b3CreateBody(WorldId,&Body);
+            if(B3_IS_NULL(Id) || !Box3D::StaticGeometry::AddBakedShapes(Id,Shape,Geometry,Bucket.Meshes))
+            { bExternalSnapshotFault=true; break; }
+            Bucket.Bodies.Add(Id);
+        }
+        UE_LOG(LogBox3D,Log,TEXT("Imported %d current static scene actors; %s"),Bucket.Bodies.Num(),*LiveSceneGeometryManifest);
+        OwnedStaticGeometryBuckets.Add(MoveTemp(Bucket));
+    }
 
 	if (!bExternalSimulationDriven && !StaticGeometryTag.IsNone())
 	{
@@ -291,7 +312,7 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 	BulkStaticLevels.Reset();
 
 	// Same for baked-asset bodies' mesh data.
-	for (FBulkStaticLevel& Bucket : BakedStaticBuckets)
+	for (FBulkStaticLevel& Bucket : OwnedStaticGeometryBuckets)
 	{
 		for (b3MeshData* Mesh : Bucket.Meshes)
 		{
@@ -301,7 +322,8 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 			}
 		}
 	}
-	BakedStaticBuckets.Reset();
+	OwnedStaticGeometryBuckets.Reset();
+    LiveSceneGeometryManifest.Reset();
 
 	DestroyAllJoints(); // the world took the joints with it; drop the slot table
 
@@ -355,7 +377,7 @@ void UBox3DSubsystem::RegisterLevelStaticGeometry(ULevel* Level)
 	if (Tagged.Num() == 0)
 	{
 		const UWorld* OwningWorld = Level->GetWorld();
-		if (BakedStaticBuckets.Num() == 0 && OwningWorld != nullptr && OwningWorld->PersistentLevel == Level)
+		if (OwnedStaticGeometryBuckets.Num() == 0 && OwningWorld != nullptr && OwningWorld->PersistentLevel == Level)
 		{
 			UE_LOG(LogBox3D, Warning,
 				TEXT("box3d: no actor carries tag '%s' and no baked collision is loaded - this world has ")
@@ -569,7 +591,7 @@ void UBox3DSubsystem::LoadBakedStaticGeometry()
 			Bucket.Bodies.Num(), *GetNameSafe(Data));
 		if (Bucket.Bodies.Num() > 0)
 		{
-			BakedStaticBuckets.Add(MoveTemp(Bucket));
+			OwnedStaticGeometryBuckets.Add(MoveTemp(Bucket));
 		}
 		else
 		{
@@ -721,7 +743,7 @@ void UBox3DSubsystem::DebugDraw()
 		BulkBodyCount += Pair.Value.Bodies.Num();
 	}
 	int32 BakedBodyCount = 0;
-	for (const FBulkStaticLevel& Bucket : BakedStaticBuckets)
+	for (const FBulkStaticLevel& Bucket : OwnedStaticGeometryBuckets)
 	{
 		BakedBodyCount += Bucket.Bodies.Num();
 	}
@@ -775,7 +797,7 @@ void UBox3DSubsystem::DebugDraw()
 		{
 			DrawBodyAABBs(Pair.Value.Bodies);
 		}
-		for (const FBulkStaticLevel& Bucket : BakedStaticBuckets)
+		for (const FBulkStaticLevel& Bucket : OwnedStaticGeometryBuckets)
 		{
 			DrawBodyAABBs(Bucket.Bodies);
 		}
@@ -931,7 +953,7 @@ bool UBox3DSubsystem::RestoreExternalPhysicsSnapshot(TConstArrayView<uint8> Byte
 
 FString UBox3DSubsystem::GetExternalGeometryManifest() const
 {
-    if(bExternalSimulationDriven)return TEXT("placed-rollback-blueprints-only-v1");
+    if(bExternalSimulationDriven)return LiveSceneGeometryManifest;
     TArray<FString> Entries;
     for(const auto* Asset:GatherBakedCollisionAssets())
     {

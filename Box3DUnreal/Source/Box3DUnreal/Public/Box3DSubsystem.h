@@ -488,7 +488,8 @@ private:
 
 	/** Bodies instantiated from the baked collision assets (one bucket per loaded asset).
 	 *  Owned like the bulk levels: freed in DestroyBox3DWorld. */
-	TArray<FBulkStaticLevel> BakedStaticBuckets;
+	TArray<FBulkStaticLevel> OwnedStaticGeometryBuckets;
+    FString LiveSceneGeometryManifest;
 	FDelegateHandle LevelAddedHandle;
 	FDelegateHandle LevelRemovedHandle;
 };

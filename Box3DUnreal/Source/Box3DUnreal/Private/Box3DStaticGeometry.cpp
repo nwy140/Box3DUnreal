@@ -6,6 +6,13 @@
 #include "Box3DLog.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/ShapeComponent.h"
+#include "LandscapeHeightfieldCollisionComponent.h"
+#include "Chaos/HeightField.h"
+#include "Chaos/TriangleMeshImplicitObject.h"
+#include "Engine/World.h"
+#include "Engine/Level.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
 #include "Interfaces/Interface_CollisionDataProvider.h"
@@ -175,13 +182,14 @@ namespace Box3D::StaticGeometry
 			// Sphyls: local-Z axis, Length spans the two hemisphere centers.
 			for (const FKSphylElem& Capsule : Agg.SphylElems)
 			{
-				const FTransform ElemTM(Capsule.Rotation, Capsule.Center);
-				const float HalfLen = Capsule.Length * 0.5f;
+				const FKSphylElem ScaledCapsule = Capsule.GetFinalScaled(Scale, FTransform::Identity);
+                const FTransform ElemTM(ScaledCapsule.Rotation, ScaledCapsule.Center);
+				const float HalfLen = ScaledCapsule.Length * 0.5f;
 				FBox3DBakedShape Shape;
 				Shape.Kind = EBox3DBakedShapeKind::Capsule;
-				Shape.CenterA = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, +HalfLen)), Scale);
-				Shape.CenterB = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, -HalfLen)), Scale);
-				Shape.Radius = Capsule.Radius * RadialScale * M;
+				Shape.CenterA = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, +HalfLen)), FVector::OneVector);
+				Shape.CenterB = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, -HalfLen)), FVector::OneVector);
+				Shape.Radius = ScaledCapsule.Radius * M;
 				OutShapes.Add(MoveTemp(Shape));
 				++Created;
 			}
@@ -304,7 +312,7 @@ namespace Box3D::StaticGeometry
 		}
 	} // namespace
 
-	bool ExtractStaticCollision(AActor* Owner, ESource Source, bool bInvertWinding, FBox3DBakedBody& Out)
+	bool ExtractStaticCollision(AActor* Owner, ESource Source, bool bInvertWinding, FBox3DBakedBody& Out, bool bStaticOnly)
 	{
 		if (Owner == nullptr)
 		{
@@ -314,18 +322,14 @@ namespace Box3D::StaticGeometry
 		Out.WorldTransform = Owner->GetActorTransform();
 		Out.ActorKey = Owner->GetPathName();
 
-		// Every primitive on the actor, not just the root: a multi-component static actor keeps
-		// its collision on children, and rooting the search at GetRootComponent() finds nothing.
-		//
-		// This does NOT cover a landscape. Landscape collision is a Chaos heightfield, and no
-		// landscape class implements IInterface_CollisionDataProvider or fills AggGeom, so a
-		// landscape reaches the end of this function and the collision bake is refused.
-		// Extracting it needs a b3CreateHeightField path off ULandscapeHeightfieldCollisionComponent.
+		// Read authored static collision on all children, foliage instances and landscape sections.
 		TArray<UPrimitiveComponent*> Primitives;
 		Owner->GetComponents<UPrimitiveComponent>(Primitives);
-        Primitives.RemoveAll([](const UPrimitiveComponent* Prim)
+        Primitives.RemoveAll([bStaticOnly](const UPrimitiveComponent* Prim)
         {
-            return !Prim || !Prim->IsCollisionEnabled() || Prim->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block;
+            return !Prim || !Prim->IsCollisionEnabled() || Prim->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block ||
+                (bStaticOnly && (Prim->Mobility == EComponentMobility::Movable || Prim->IsSimulatingPhysics() ||
+                (!Prim->IsA<UStaticMeshComponent>() && !Prim->IsA<ULandscapeHeightfieldCollisionComponent>() && !Prim->IsA<UShapeComponent>())));
         });
         Primitives.Sort([](const UPrimitiveComponent& A, const UPrimitiveComponent& B)
         {
@@ -361,27 +365,74 @@ namespace Box3D::StaticGeometry
         // actor must retain both its authored simple and complex components.
         for(UPrimitiveComponent* Prim:Primitives)
         {
-            const UBodySetup* Setup=Prim->GetBodySetup();
+            if(auto* Landscape=Cast<ULandscapeHeightfieldCollisionComponent>(Prim))
+            {
+                if(!Landscape->HeightfieldRef && !Landscape->LocalHeightfieldGeometryRef) Landscape->CreateCollisionObject();
+                auto Field=Landscape->HeightfieldRef ? Landscape->HeightfieldRef->HeightfieldGeometry : Landscape->LocalHeightfieldGeometryRef;
+                if(!Field) { UE_LOG(LogBox3D,Error,TEXT("Landscape %s has no loaded cooked collision."),*Prim->GetPathName()); return false; }
+                FBox3DBakedShape Shape; Shape.Kind=EBox3DBakedShapeKind::Mesh;
+                const int32 Rows=Field->GetNumRows(), Cols=Field->GetNumCols();
+                const FTransform Placement=FTransform(Prim->GetComponentQuat(),Prim->GetComponentLocation()).GetRelativeTransform(FTransform(ActorToWorld.GetRotation(),ActorToWorld.GetTranslation()));
+                for(int32 I=0;I<Rows*Cols;++I) Shape.Points.Add(LocalToBaked(FVector(Field->GetPointScaled(I)),FVector::OneVector));
+                for(int32 R=0;R<Rows-1;++R) for(int32 C=0;C<Cols-1;++C)
+                {
+                    if(Field->IsHole(C,R)) continue;
+                    for(int32 T=0;T<2;++T)
+                    {
+                        Chaos::FTriangle Triangle; int32 A,B,CIndex;
+                        Field->GetTransformedTriangle(2*(R*(Cols-1)+C)+T,Chaos::FRigidTransform3::Identity,Triangle,A,B,CIndex);
+                        Shape.Indices.Append({A,CIndex,B}); // Unreal -> Box3D reflection reverses winding.
+                    }
+                }
+                PlaceShape(Shape,Placement); Out.Shapes.Add(MoveTemp(Shape));
+                continue;
+            }
+            UBodySetup* Setup=Prim->GetBodySetup();
             const bool Complex=Source==ESource::ComplexCollision ||
-                (Source==ESource::Auto && Setup && Setup->GetCollisionTraceFlag()==CTF_UseComplexAsSimple);
-            const int32 Before=Out.Shapes.Num();
-            const FTransform Relative=Prim->GetComponentTransform().GetRelativeTransform(ActorToWorld);
-            if(Complex)
+                (Source==ESource::Auto && Setup && (Setup->GetCollisionTraceFlag()==CTF_UseComplexAsSimple ||
+                (Setup->GetCollisionTraceFlag()==CTF_UseSimpleAndComplex && Setup->AggGeom.GetElementCount()==0)));
+            TArray<FTransform> Placements;
+            if(auto* Instances=Cast<UInstancedStaticMeshComponent>(Prim))
             {
-                if(auto* Provider=FindTriMeshProvider(Prim))
-                    ExtractComplexTriMesh(Provider,Prim->GetComponentScale(),bInvertWinding,Relative,Out.Shapes);
+                for(int32 I=0;I<Instances->GetInstanceCount();++I)
+                { FTransform Instance; if(Instances->GetInstanceTransform(I,Instance,true)) Placements.Add(Instance); }
             }
-            else
+            else Placements.Add(Prim->GetComponentTransform());
+            for(const FTransform& Instance:Placements)
             {
-                ExtractSimpleCollision(Prim,Prim->GetComponentScale(),Out.Shapes);
+                const int32 Before=Out.Shapes.Num();
+                const FTransform Relative=Instance.GetRelativeTransform(FTransform(ActorToWorld.GetRotation(),ActorToWorld.GetTranslation()));
                 const FTransform Placement(Relative.GetRotation(),Relative.GetTranslation(),FVector::OneVector);
-                for(int32 Index=Before;Index<Out.Shapes.Num();++Index)PlaceShape(Out.Shapes[Index],Placement);
-            }
-            if(Out.Shapes.Num()==Before)
-            {
-                UE_LOG(LogBox3D,Warning,TEXT("%s: Pawn-blocking component %s has no usable %s collision; bake refused."),
-                    *GetNameSafe(Owner),*Prim->GetName(),Complex?TEXT("complex"):TEXT("simple"));
-                Out.Shapes.Reset();return false;
+                if(Complex && Setup)
+                {
+                    // Read cooked physics geometry: works without Allow CPU Access or editor mesh data.
+                    Setup->CreatePhysicsMeshes();
+                    for(const auto& Mesh:Setup->TriMeshGeometries)
+                    {
+                        if(!Mesh) continue;
+                        FBox3DBakedShape Shape; Shape.Kind=EBox3DBakedShapeKind::Mesh;
+                        const auto& Particles=Mesh->Particles();
+                        for(int32 I=0;I<int32(Particles.Size());++I) Shape.Points.Add(LocalToBaked(FVector(Particles.GetX(I)),Instance.GetScale3D()));
+                        for(int32 I=0;I<Mesh->Elements().GetNumTriangles();++I)
+                        {
+                            Chaos::FTriangle Triangle; int32 A,B,C;
+                            Mesh->GetTransformedTriangle(I,Chaos::FRigidTransform3::Identity,Triangle,A,B,C);
+                            if(!ShouldReverseWinding(Instance.GetScale3D(),bInvertWinding)) Shape.Indices.Append({A,C,B});
+                            else Shape.Indices.Append({A,B,C});
+                        }
+                        PlaceShape(Shape,Placement); Out.Shapes.Add(MoveTemp(Shape));
+                    }
+                }
+                else
+                {
+                    ExtractSimpleCollision(Prim,Instance.GetScale3D(),Out.Shapes);
+                    for(int32 Index=Before;Index<Out.Shapes.Num();++Index) PlaceShape(Out.Shapes[Index],Placement);
+                }
+                if(Out.Shapes.Num()==Before)
+                {
+                    UE_LOG(LogBox3D,Error,TEXT("%s: Pawn-blocking component has no usable authored collision."),*Prim->GetPathName());
+                    Out.Shapes.Reset(); return false;
+                }
             }
         }
         if(!Out.Shapes.IsEmpty())return true;
@@ -392,6 +443,40 @@ namespace Box3D::StaticGeometry
 			*GetNameSafe(Owner));
 		return false;
 	}
+
+    bool ExtractSceneCollision(UWorld* World,TArray<FBox3DBakedBody>& Out)
+    {
+        Out.Reset(); if(!World) return false;
+        TArray<AActor*> Actors;
+        for(ULevel* Level:World->GetLevels()) if(Level) for(AActor* Actor:Level->Actors)
+        {
+            if(!IsValid(Actor) || Actor->IsActorBeingDestroyed()) continue;
+            bool bExplicitBody=false;
+            for(UClass* Class=Actor->GetClass();Class;Class=Class->GetSuperClass())
+                if(Class->GetFName()==FName(TEXT("RollbackPhysicsProp"))) bExplicitBody=true;
+            TArray<UActorComponent*> Components; Actor->GetComponents(Components);
+            for(auto* Component:Components) for(UClass* Class=Component->GetClass();Class;Class=Class->GetSuperClass())
+                if(Class->GetFName()==FName(TEXT("Box3DBodyComponent"))) bExplicitBody=true;
+            if(!bExplicitBody) Actors.Add(Actor);
+        }
+        Actors.Sort([](const AActor& A,const AActor& B){return UWorld::RemovePIEPrefix(A.GetPathName())<UWorld::RemovePIEPrefix(B.GetPathName());});
+        for(auto* Actor:Actors)
+        {
+            TArray<UPrimitiveComponent*> Primitives; Actor->GetComponents(Primitives);
+            bool bCandidate=false;
+            for(auto* Prim:Primitives)
+                if(Prim->Mobility!=EComponentMobility::Movable && !Prim->IsSimulatingPhysics() && Prim->IsCollisionEnabled() &&
+                   Prim->GetCollisionResponseToChannel(ECC_Pawn)==ECR_Block &&
+                   (Prim->IsA<UStaticMeshComponent>() || Prim->IsA<ULandscapeHeightfieldCollisionComponent>() || Prim->IsA<UShapeComponent>()))
+                { if(auto* Instances=Cast<UInstancedStaticMeshComponent>(Prim)) bCandidate|=Instances->GetInstanceCount()>0; else bCandidate=true; }
+            if(!bCandidate) continue;
+            FBox3DBakedBody Body;
+            if(ExtractStaticCollision(Actor,ESource::Auto,false,Body,true))
+            { Body.ActorKey=UWorld::RemovePIEPrefix(Actor->GetPathName()); Out.Add(MoveTemp(Body)); }
+            else return false;
+        }
+        return true;
+    }
 
 	bool AddBakedShapes(
 		b3BodyId Body, const b3ShapeDef& Base, const FBox3DBakedBody& Baked, TArray<b3MeshData*>& OutOwnedMeshes)
@@ -406,6 +491,7 @@ namespace Box3D::StaticGeometry
 				++Created;
 				break;
 			case EBox3DBakedShapeKind::Mesh:
+                if(Shape.Indices.IsEmpty()) { ++Created; break; }
 				if (b3MeshData* Mesh = InstantiateMesh(Body, Base, Shape))
 				{
 					OutOwnedMeshes.Add(Mesh);
