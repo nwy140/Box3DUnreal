@@ -114,9 +114,11 @@ void UBox3DSubsystem::EnableSimulation()
 	bEnabledActive = true;
 
 	// Pre-baked static collision: instantiate cached bodies with no runtime cooking.
-	LoadBakedStaticGeometry();
+	// Rollback scenes are authored by placed physics Blueprints. Never revive
+	// removed map actors through an old BC_ cache or a global collision asset.
+	if (!bExternalSimulationDriven) LoadBakedStaticGeometry();
 
-	if (!StaticGeometryTag.IsNone())
+	if (!bExternalSimulationDriven && !StaticGeometryTag.IsNone())
 	{
 		LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UBox3DSubsystem::OnLevelAddedToWorld);
 		LevelRemovedHandle = FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UBox3DSubsystem::OnLevelRemovedFromWorld);
@@ -929,6 +931,7 @@ bool UBox3DSubsystem::RestoreExternalPhysicsSnapshot(TConstArrayView<uint8> Byte
 
 FString UBox3DSubsystem::GetExternalGeometryManifest() const
 {
+    if(bExternalSimulationDriven)return TEXT("placed-rollback-blueprints-only-v1");
     TArray<FString> Entries;
     for(const auto* Asset:GatherBakedCollisionAssets())
     {

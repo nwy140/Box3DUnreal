@@ -425,11 +425,10 @@ private:
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
 	TArray<TSoftObjectPtr<UBox3DCollisionData>> BakedCollisionAssets;
 
-	/** Also load the current map's baked asset (BC_<MapName> beside the map) without it being
-	 *  listed above. On by default: forgetting to list an asset silently loads a level with no
-	 *  static collision, which looks like a physics bug rather than a config mistake. */
+	/** Optional legacy lookup of BC_<MapName>. Off by default. Externally driven
+	 *  rollback worlds ignore map bakes even when this legacy setting is enabled. */
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
-	bool bAutoDiscoverBakedCollision = true;
+	bool bAutoDiscoverBakedCollision = false;
 
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
